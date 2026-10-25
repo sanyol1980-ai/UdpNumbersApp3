@@ -1,0 +1,253 @@
+name: Build UDP Numbers APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Create project and build APK
+        shell: bash
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          mkdir -p app/src/main/java/ru/example/udpnumbers
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "UdpNumbersAndroid"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "ru.example.udpnumbers"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "ru.example.udpnumbers"
+                  minSdk = 23
+                  targetSdk = 28
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <application android:theme="@android:style/Theme.Material.Light"
+                  android:label="UDP Числа"
+                  android:usesCleartextTraffic="true">
+                  <activity android:name="ru.example.udpnumbers.MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/ru/example/udpnumbers/MainActivity.kt <<'EOF'
+          package ru.example.udpnumbers
+
+          import android.app.Activity
+          import android.os.Bundle
+          import android.graphics.Color
+          import android.widget.*
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.InetAddress
+
+          class MainActivity : Activity() {
+              private lateinit var ip: EditText
+              private lateinit var port: EditText
+              private lateinit var localPort: EditText
+              private lateinit var data: EditText
+              private lateinit var logView: TextView
+              @Volatile private var receiver: DatagramSocket? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(20, 20, 20, 20)
+                  }
+                  val scroll = ScrollView(this)
+                  scroll.addView(layout)
+                  setContentView(scroll)
+
+                  fun label(s: String) {
+                      layout.addView(TextView(this).apply {
+                          text = s
+                          textSize = 16f
+                          setPadding(0, 10, 0, 4)
+                      })
+                  }
+
+                  fun field(s: String): EditText {
+                      val f = EditText(this)
+                      f.setText(s)
+                      f.isSingleLine = true
+                      layout.addView(f)
+                      return f
+                  }
+
+                  label("UDP Числа — отправка и приём")
+                  label("IP получателя")
+                  ip = field("192.168.1.100")
+                  label("Порт получателя")
+                  port = field("5000")
+                  label("Данные для отправки")
+                  data = field("123")
+
+                  layout.addView(Button(this).apply {
+                      text = "Отправить UDP"
+                      setOnClickListener { sendData() }
+                  })
+
+                  label("Локальный порт для приёма")
+                  localPort = field("5000")
+
+                  layout.addView(Button(this).apply {
+                      text = "Начать приём"
+                      setOnClickListener { startReceiver() }
+                  })
+
+                  layout.addView(Button(this).apply {
+                      text = "Остановить приём"
+                      setOnClickListener {
+                          receiver?.close()
+                          receiver = null
+                          log("Приём остановлен")
+                      }
+                  })
+
+                  label("Журнал сообщений")
+                  logView = TextView(this).apply {
+                      textSize = 14f
+                      setTextColor(Color.DKGRAY)
+                      text = "Готово к работе\n"
+                  }
+                  layout.addView(logView)
+              }
+
+              private fun sendData() {
+                  val host = ip.text.toString().trim()
+                  val p = port.text.toString().toIntOrNull()
+                  val message = data.text.toString()
+                  if (p == null || p !in 1..65535) {
+                      log("Ошибка: неверный порт")
+                      return
+                  }
+                  Thread {
+                      try {
+                          DatagramSocket().use { socket ->
+                              val bytes = message.toByteArray(Charsets.UTF_8)
+                              socket.send(DatagramPacket(
+                                  bytes, bytes.size,
+                                  InetAddress.getByName(host), p
+                              ))
+                          }
+                          runOnUiThread { log("Отправлено: $message → $host:$p") }
+                      } catch (e: Exception) {
+                          runOnUiThread { log("Ошибка отправки: ${e.message}") }
+                      }
+                  }.start()
+              }
+
+              private fun startReceiver() {
+                  val p = localPort.text.toString().toIntOrNull()
+                  if (p == null || p !in 1..65535) {
+                      log("Ошибка: неверный локальный порт")
+                      return
+                  }
+                  receiver?.close()
+                  log("Ожидание UDP на порту $p…")
+                  Thread {
+                      try {
+                          val socket = DatagramSocket(p)
+                          receiver = socket
+                          while (!socket.isClosed) {
+                              val buffer = ByteArray(65507)
+                              val packet = DatagramPacket(buffer, buffer.size)
+                              socket.receive(packet)
+                              val message = String(
+                                  packet.data, packet.offset,
+                                  packet.length, Charsets.UTF_8
+                              )
+                              runOnUiThread {
+                                  log("Принято от ${packet.address.hostAddress}:${packet.port}: $message")
+                              }
+                          }
+                      } catch (e: Exception) {
+                          if (receiver != null) {
+                              runOnUiThread { log("Ошибка приёма: ${e.message}") }
+                          }
+                      }
+                  }.start()
+              }
+
+              private fun log(s: String) {
+                  logView.append("$s\n")
+              }
+
+              override fun onDestroy() {
+                  receiver?.close()
+                  receiver = null
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+          gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: udp-numbers-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
